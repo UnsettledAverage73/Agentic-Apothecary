@@ -1,0 +1,12 @@
+pandas
+openpyxl
+fastapi
+uvicorn
+langgraph
+langgraph-prebuilt
+langchain-core
+langchain-openai
+streamlit
+requests
+langfuse
+pydantic
