@@ -1,81 +1,87 @@
 import pandas as pd
 import re
+import sqlite3
 from datetime import timedelta, datetime
 
-# Mock current date for calculations (to match user's example)
+DB_PATH = "pharmacy.db"
 CURRENT_DATE = datetime(2024, 3, 27)
 
 def extract_unit_count(package_size):
     if not isinstance(package_size, str):
         return 10
-    # Try to find something like 30x0.5 ml -> 30
     match_x = re.search(r'(\d+)\s*x', package_size)
-    if match_x:
-        return int(match_x.group(1))
-    # Try to find something like 120 st -> 120
+    if match_x: return int(match_x.group(1))
     match_num = re.search(r'(\d+)', package_size)
-    if match_num:
-        return int(match_num.group(1))
+    if match_num: return int(match_num.group(1))
     return 10
 
 def map_dosage(dosage_str):
-    mapping = {
-        'Once daily': 1,
-        'Twice daily': 2,
-        'Three times daily': 3,
-        'As needed': 1
-    }
+    mapping = {'Once daily': 1, 'Twice daily': 2, 'Three times daily': 3, 'As needed': 1}
     return mapping.get(dosage_str, 1)
 
-# Load data
-history_df = pd.read_excel('db/Consumer Order History 1.xlsx', header=4)
-products_df = pd.read_excel('db/products-export.xlsx')
+def calculate_probabilistic_refills():
+    conn = sqlite3.connect(DB_PATH)
+    
+    # Load orders and products
+    orders_df = pd.read_sql_query("SELECT * FROM orders", conn)
+    products_df = pd.read_sql_query("SELECT name, package_size FROM products", conn)
+    
+    orders_df['purchase_date'] = pd.to_datetime(orders_df['purchase_date'])
+    
+    # 1. Group by patient and product to find intervals
+    predictions = []
+    
+    for (pid, pname), group in orders_df.groupby(['patient_id', 'product_name']):
+        group = group.sort_values('purchase_date')
+        last_order = group.iloc[-1]
+        
+        # Get product details
+        p_info = products_df[products_df['name'] == pname].iloc[0]
+        unit_count = extract_unit_count(p_info['package_size'])
+        theoretical_dosage = map_dosage(last_order['dosage_frequency'])
+        theoretical_days = (unit_count * last_order['quantity']) / theoretical_dosage
+        
+        # Calculate Observed Interval if multiple orders exist
+        if len(group) > 1:
+            # Average days between purchases
+            intervals = group['purchase_date'].diff().dt.days.dropna()
+            avg_observed_interval = intervals.mean()
+            
+            # Use Observed Interval (it accounts for 'As needed' behavior)
+            # We use a 70/30 weight towards observed behavior
+            final_days_estimate = (0.7 * avg_observed_interval) + (0.3 * theoretical_days)
+            logic_used = "Probabilistic (Observed Behavior)"
+        else:
+            final_days_estimate = theoretical_days
+            logic_used = "Theoretical (Fixed Dosage)"
+            
+        predicted_date = last_order['purchase_date'] + timedelta(days=int(final_days_estimate))
+        
+        # Determine Action
+        days_diff = (predicted_date - CURRENT_DATE).days
+        if days_diff < 0: action = 'OVERDUE - Trigger Outreach'
+        elif days_diff <= 5: action = f'Alert in {days_diff} days'
+        else: action = 'No action needed yet'
+        
+        if action != 'No action needed yet':
+            predictions.append({
+                'patient_id': pid,
+                'product_name': pname,
+                'predicted_date': str(predicted_date.date()),
+                'action': action
+            })
 
-# Merge to get package size
-merged_df = pd.merge(
-    history_df,
-    products_df[['product name', 'package size']],
-    left_on='Product Name',
-    right_on='product name',
-    how='left'
-)
+    # Save to Database
+    conn.execute("DELETE FROM refill_predictions")
+    for pred in predictions:
+        conn.execute("""
+        INSERT INTO refill_predictions (patient_id, product_name, predicted_date, action)
+        VALUES (?, ?, ?, ?)
+        """, (pred['patient_id'], pred['product_name'], pred['predicted_date'], pred['action']))
+    
+    conn.commit()
+    conn.close()
+    print(f"Probabilistic Refill Engine complete. Processed {len(predictions)} alerts.")
 
-# Prepare columns
-merged_df['Unit Count'] = merged_df['package size'].apply(extract_unit_count)
-merged_df['Daily Dosage'] = merged_df['Dosage Frequency'].apply(map_dosage)
-merged_df['Days Until Empty'] = (merged_df['Unit Count'] * merged_df['Quantity']) / merged_df['Daily Dosage']
-merged_df['Predicted Refill Date'] = merged_df.apply(
-    lambda row: row['Purchase Date'] + timedelta(days=int(row['Days Until Empty'])),
-    axis=1
-)
-
-# 1. mock_inventory.csv
-# product name, stock_level, prescription_required
-inventory = merged_df[['Product Name', 'Prescription Required']].drop_duplicates()
-inventory.columns = ['product name', 'prescription_required']
-inventory['stock_level'] = 100
-inventory.to_csv('mock_inventory.csv', index=False)
-
-# 2. pharmacy_refill_predictions.csv
-# Patient ID, Product Name, Predicted Refill Date, Action
-predictions = merged_df[['Patient ID', 'Product Name', 'Predicted Refill Date']].copy()
-
-def get_action(refill_date):
-    days_diff = (refill_date - CURRENT_DATE).days
-    if days_diff < 0:
-        return 'OVERDUE - Trigger Outreach'
-    elif days_diff <= 2:
-        return f'Alert in {days_diff} days'
-    elif days_diff <= 5:
-        return f'Alert in {days_diff} days'
-    else:
-        return 'No action needed yet'
-
-predictions['Action'] = predictions['Predicted Refill Date'].apply(get_action)
-predictions.to_csv('pharmacy_refill_predictions.csv', index=False)
-
-# 3. proactive_refills.csv
-proactive = predictions[predictions['Action'] != 'No action needed yet']
-proactive.to_csv('proactive_refills.csv', index=False)
-
-print("CSVs generated successfully.")
+if __name__ == "__main__":
+    calculate_probabilistic_refills()

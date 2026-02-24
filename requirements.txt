@@ -2,11 +2,16 @@ pandas
 openpyxl
 fastapi
 uvicorn
+gunicorn
+python-dotenv
 langgraph
+langgraph-checkpoint-sqlite
 langgraph-prebuilt
 langchain-core
-langchain-openai
+langchain-google-genai
 streamlit
 requests
 langfuse
 pydantic
+sqlalchemy
+psycopg2-binary
