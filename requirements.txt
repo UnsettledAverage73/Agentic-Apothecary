@@ -15,3 +15,6 @@ langfuse
 pydantic
 sqlalchemy
 psycopg2-binary
+rapidfuzz
+elevenlabs
+groq

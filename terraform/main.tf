@@ -74,10 +74,18 @@ resource "aws_instance" "app_server" {
   }
 }
 
+resource "aws_sns_topic" "order_notifications" {
+  name = "order-notifications"
+}
+
 output "instance_public_ip" {
   value = aws_instance.app_server.public_ip
 }
 
 output "bucket_name" {
   value = aws_s3_bucket.data_bucket.id
+}
+
+output "sns_topic_arn" {
+  value = aws_sns_topic.order_notifications.arn
 }
